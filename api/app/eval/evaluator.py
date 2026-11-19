@@ -1,9 +1,8 @@
+import json
+import logging
 import time
-from typing import Any
 
-import anthropic
-
-from app.core.config import settings
+from app.core.llm import call_claude
 from app.guardrails.engine import run_guardrails
 from app.models.schemas import (
     EvalComparison,
@@ -13,6 +12,7 @@ from app.models.schemas import (
     LLMProvider,
 )
 
+logger = logging.getLogger(__name__)
 
 PRICING = {
     LLMProvider.CLAUDE: {"input": 3.0 / 1_000_000, "output": 15.0 / 1_000_000},
@@ -20,60 +20,46 @@ PRICING = {
     LLMProvider.GEMINI: {"input": 1.25 / 1_000_000, "output": 5.0 / 1_000_000},
 }
 
-MODEL_MAP = {
-    LLMProvider.CLAUDE: "claude-sonnet-5-5",
-}
-
 
 def call_model(provider: LLMProvider, prompt: str, temperature: float, max_tokens: int) -> dict:
-    start = time.time()
-
     if provider == LLMProvider.CLAUDE:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        response = client.messages.create(
-            model=MODEL_MAP[provider],
-            max_tokens=max_tokens,
-            temperature=temperature,
+        result = call_claude(
             messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
-        latency = int((time.time() - start) * 1000)
         return {
-            "text": response.content[0].text,
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
-            "latency_ms": latency,
+            "text": result["text"],
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
+            "latency_ms": result["latency_ms"],
         }
     else:
-        latency = int((time.time() - start) * 1000) + 50
         return {
             "text": f"[{provider.value} not configured — mock response for comparison]",
             "input_tokens": len(prompt.split()) * 2,
             "output_tokens": 50,
-            "latency_ms": latency,
+            "latency_ms": 50,
         }
 
 
 def score_response(prompt: str, response: str) -> dict[str, float]:
     """Score a response on relevance, coherence, and faithfulness using Claude as judge."""
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    judge_response = client.messages.create(
-        model="claude-sonnet-5-5",
-        max_tokens=200,
-        temperature=0,
-        system=(
-            "You are an LLM output evaluator. Score the response on three dimensions, "
-            "each from 0.0 to 1.0. Return ONLY a JSON object: "
-            '{"relevance": 0.0, "coherence": 0.0, "faithfulness": 0.0}'
-        ),
-        messages=[{
-            "role": "user",
-            "content": f"Prompt: {prompt}\n\nResponse: {response}\n\nScore this response:",
-        }],
-    )
-
-    import json
     try:
-        text = judge_response.content[0].text.strip()
+        result = call_claude(
+            messages=[{
+                "role": "user",
+                "content": f"Prompt: {prompt}\n\nResponse: {response}\n\nScore this response:",
+            }],
+            system=(
+                "You are an LLM output evaluator. Score the response on three dimensions, "
+                "each from 0.0 to 1.0. Return ONLY a JSON object: "
+                '{"relevance": 0.0, "coherence": 0.0, "faithfulness": 0.0}'
+            ),
+            max_tokens=200,
+            temperature=0,
+        )
+        text = result["text"].strip()
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -85,6 +71,7 @@ def score_response(prompt: str, response: str) -> dict[str, float]:
             "faithfulness": float(scores.get("faithfulness", 0)),
         }
     except (json.JSONDecodeError, ValueError, KeyError):
+        logger.warning("Failed to parse eval scores, returning zeros")
         return {"relevance": 0.0, "coherence": 0.0, "faithfulness": 0.0}
 
 

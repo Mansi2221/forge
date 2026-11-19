@@ -1,10 +1,8 @@
+import logging
 import time
 import uuid
-from typing import Any
 
-import anthropic
-
-from app.core.config import settings
+from app.core.llm import call_claude
 from app.models.schemas import (
     AgentConfig,
     AgentMessage,
@@ -13,6 +11,8 @@ from app.models.schemas import (
     WorkflowConfig,
     WorkflowRun,
 )
+
+logger = logging.getLogger(__name__)
 
 ROLE_SYSTEM_PROMPTS = {
     AgentRole.PLANNER: (
@@ -35,7 +35,7 @@ ROLE_SYSTEM_PROMPTS = {
 }
 
 
-def call_llm(
+def _call_llm(
     model: LLMProvider,
     system_prompt: str,
     messages: list[dict],
@@ -43,17 +43,15 @@ def call_llm(
     max_tokens: int = 1024,
 ) -> tuple[str, dict]:
     if model == LLMProvider.CLAUDE:
-        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        response = client.messages.create(
-            model="claude-sonnet-5-5",
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system_prompt,
+        result = call_claude(
             messages=messages,
+            system=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
-        return response.content[0].text, {
-            "input_tokens": response.usage.input_tokens,
-            "output_tokens": response.usage.output_tokens,
+        return result["text"], {
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
         }
     else:
         return f"[{model.value} provider not configured — using mock response]", {
@@ -72,7 +70,9 @@ def run_agent(
     if context:
         user_content = f"Previous context:\n{context}\n\nCurrent task:\n{task}"
 
-    response_text, usage = call_llm(
+    logger.info("Running agent: role=%s model=%s", agent.role.value, agent.model.value)
+
+    response_text, usage = _call_llm(
         model=agent.model,
         system_prompt=system_prompt,
         messages=[{"role": "user", "content": user_content}],
@@ -92,6 +92,8 @@ def run_workflow(config: WorkflowConfig, user_input: str) -> WorkflowRun:
     start_time = time.time()
     messages: list[AgentMessage] = []
     total_tokens: dict[str, int] = {"input": 0, "output": 0}
+
+    logger.info("Starting workflow: name=%s agents=%d", config.name, len(config.agents))
 
     messages.append(AgentMessage(
         role="user",
@@ -117,6 +119,13 @@ def run_workflow(config: WorkflowConfig, user_input: str) -> WorkflowRun:
 
     duration = int((time.time() - start_time) * 1000)
     final_result = messages[-1].content if messages else ""
+
+    logger.info(
+        "Workflow complete: name=%s duration=%dms tokens=%d",
+        config.name,
+        duration,
+        total_tokens["input"] + total_tokens["output"],
+    )
 
     return WorkflowRun(
         id=run_id,

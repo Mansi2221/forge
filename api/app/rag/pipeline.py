@@ -1,11 +1,11 @@
 import hashlib
-import time
+import logging
 from dataclasses import dataclass, field
 
-import anthropic
-
-from app.core.config import settings
+from app.core.llm import call_claude
 from app.models.schemas import DocumentChunk, RAGQuery, RAGResponse
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,6 +89,7 @@ def ingest_document(filename: str, content: str, metadata: dict | None = None) -
             embedding=embedding,
             metadata={"filename": filename, "chunk_index": i, **(metadata or {})},
         )
+    logger.info("Ingested %s: %d chunks", filename, len(chunks))
     return len(chunks)
 
 
@@ -118,27 +119,20 @@ def rag_query(query: RAGQuery) -> RAGResponse:
 
     context = "\n\n---\n\n".join([s.content for s in sources])
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-    start = time.time()
-    response = client.messages.create(
-        model="claude-sonnet-5-5",
-        max_tokens=1024,
-        system="You are a helpful assistant. Answer questions based ONLY on the provided context. If the context doesn't contain the answer, say so. Cite your sources.",
+    result = call_claude(
         messages=[
             {
                 "role": "user",
                 "content": f"Context:\n{context}\n\nQuestion: {query.query}",
             }
         ],
+        system="You are a helpful assistant. Answer questions based ONLY on the provided context. If the context doesn't contain the answer, say so. Cite your sources.",
+        max_tokens=1024,
     )
-    latency = int((time.time() - start) * 1000)
-
-    answer = response.content[0].text
-    tokens = response.usage.input_tokens + response.usage.output_tokens
 
     return RAGResponse(
-        answer=answer,
+        answer=result["text"],
         sources=sources,
-        model="claude-sonnet-5-5",
-        tokens_used=tokens,
+        model=result["model"],
+        tokens_used=result["input_tokens"] + result["output_tokens"],
     )
