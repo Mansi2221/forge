@@ -4,6 +4,7 @@ import time
 import anthropic
 import httpx
 
+from app.core.budget import BudgetExceededError, budget
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ def call_claude(
     fallback: bool = True,
 ) -> dict:
     validate_input(messages)
+    budget.check_budget()
 
     client = get_client()
     model = model or settings.llm_default_model
@@ -84,6 +86,8 @@ def _make_request(
 
     response = client.messages.create(**kwargs)
     latency_ms = int((time.time() - start) * 1000)
+
+    budget.record(model, response.usage.input_tokens, response.usage.output_tokens)
 
     logger.info(
         "LLM call: model=%s tokens_in=%d tokens_out=%d latency=%dms stop=%s",
